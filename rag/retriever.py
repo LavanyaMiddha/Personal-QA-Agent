@@ -1,6 +1,6 @@
 from langchain_pinecone import PineconeVectorStore
-from langchain_google_genai import GoogleGenerativeAIEmbeddings
 from pinecone import Pinecone
+from langchain_huggingface import HuggingFaceEmbeddings
 from embeddings import Embeddings
 import os
 from dotenv import load_dotenv
@@ -9,14 +9,12 @@ load_dotenv()
 
 
 class Retriever:
-    def __init__(self, embeddings: Embeddings, search_type: str = "similarity", top_k: int = 5):
+    def __init__(self, search_type: str = "similarity", top_k: int = 5):
         self.search_type = search_type
         self.top_k = top_k
 
-        self.embeddings = GoogleGenerativeAIEmbeddings(
-            model=embeddings.model_name,
-            output_dimensionality=768,
-            task_type="RETRIEVAL_QUERY"   
+        self.embeddings = HuggingFaceEmbeddings(
+            model_name="sentence-transformers/all-MiniLM-L6-v2"
         )
 
         pc = Pinecone(api_key=os.getenv("PINECONE_API_KEY"))
@@ -44,8 +42,9 @@ class Retriever:
 
 
 if __name__ == "__main__":
-    embeddings = Embeddings()
-    retriever = Retriever(embeddings=embeddings, search_type="mmr", top_k=5)
+    print("Testing Retriever...")
+    retriever = Retriever(search_type="similarity", top_k=5)
+    print("Retriever created successfully. Retrieving documents...")
     results = retriever.retrieve("What is configuration management? what are the tools used for configuration management?")
     for doc in results:
         print(doc.page_content)
