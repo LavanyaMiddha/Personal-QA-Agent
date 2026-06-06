@@ -1,7 +1,7 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from agent.agent import Agent
+from agent.new_agent import Agent
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -41,6 +41,7 @@ def query(request: QueryRequest):
         answer = agent.invoke(request.query, thread_id=request.thread_id)
         return QueryResponse(answer=answer, thread_id=request.thread_id)
     except Exception as e:
+        print(f"Error processing query: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 

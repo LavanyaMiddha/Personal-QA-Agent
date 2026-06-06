@@ -1,5 +1,7 @@
 from typing import Annotated
+from unittest import result
 from dagster import graph
+from sympy import content
 from typing_extensions import TypedDict
 import operator
 
@@ -46,7 +48,7 @@ Always cite the source of the information when available."""
 class Agent:
     def __init__(self):
         self.model = init_chat_model(
-            "gemini-3.5-flash",                 
+            "gemini-3.1-flash-lite",                 
             model_provider="google-genai",
             temperature=0.4,
             timeout=300,
@@ -106,12 +108,22 @@ class Agent:
     def invoke(self, query: str, thread_id: str = "default"):
         result = self.graph.invoke(
             {
-                "messages": [{"role": "user", "content": query}],
-                "llm_calls": 0
+            "messages": [{"role": "user", "content": query}],
+            "llm_calls": 0
             },
-            config={"configurable": {"thread_id": thread_id}}
+        config={"configurable": {"thread_id": thread_id}}
         )
-        return result["messages"][-1].content
+    
+        last_message = result["messages"][-1]
+        content = last_message.content
+
+        # handle list of content blocks e.g. [{'type': 'text', 'text': '...'}]
+        if isinstance(content, list):
+            return " ".join(
+                block.get("text", "") 
+                for block in content 
+                if isinstance(block, dict) and block.get("type") == "text"
+            )
     
     def display_agent_graph(self):
         try:
