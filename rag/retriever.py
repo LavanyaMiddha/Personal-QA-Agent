@@ -1,7 +1,7 @@
 from langchain_pinecone import PineconeVectorStore
 from pinecone import Pinecone
 from langchain_huggingface import HuggingFaceEmbeddings
-from embeddings import Embeddings
+from rag.embeddings import Embeddings
 import os
 from dotenv import load_dotenv
 
