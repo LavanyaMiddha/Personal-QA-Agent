@@ -1,63 +1,147 @@
+from langchain_core.tools import tool
 from langchain.chat_models import init_chat_model
+from rag.retriever import Retriever
 from langchain.agents import create_agent
 from dotenv import load_dotenv
 from langgraph.checkpoint.memory import InMemorySaver
-from rag.retriever import Retriever
-from langgraph.graph import StateGraph, START, END
-from langgraph.graph.message import add_messages
+from typing import Literal
+from pydantic import BaseModel, Field
+from langchain.agents.middleware import SummarizationMiddleware, ModelCallLimitMiddleware, ToolCallLimitMiddleware, ToolRetryMiddleware
+from langchain_core.messages import AnyMessage, SystemMessage, HumanMessage, AIMessage
 
 load_dotenv()
 
-model = init_chat_model(
-    "gemini-3.5-flash",
-    model_provider="google-genai",
-    temperature=0.4,
-    timeout=300,
-    max_tokens=25000,
-)
+class RetrievedDocument(BaseModel):
+    source: str = Field(..., description="The file path source of the retrieved document.")
+    page_number: int = Field(..., description="The page number of the retrieved document.")
+    score: float = Field(..., description="The similarity score of the retrieved document.")
+    page_content: str = Field(..., description="The content of the retrieved document.")
 
-checkpointer = InMemorySaver()
+class AgentResponse(BaseModel):
+    answer: str = Field(..., description="The answer to the user's question based on the retrieved context.")
+    confidence_score: float = Field(..., description="The average confidence score of the retrieved documents.")
+    confidence_level: Literal["high", "medium", "low"] = Field(..., description="The confidence level based on the scores of the retrieved documents.")
+    retrieved_documents: list[RetrievedDocument] = Field(default=[], description="All retrieved documents. Include every single document returned by retrieve_context, not just the most relevant one.")
 
-SYSTEM_PROMPT = """
-You are a helpful assistant that can answer questions based on your knowledge and the retrieved context from a vector database. 
-Use the provided context to answer the user's question accurately. 
-If the context does not contain relevant information, answer based on your general knowledge. 
-Always cite the source of the information from the context when providing an answer."""
+_retriever = Retriever(search_type="similarity", top_k=3)
+HIGH_CONFIDENCE   = 0.8
+MEDIUM_CONFIDENCE = 0.3
 
-query = "What is configuration management? what are the tools used for configuration management?"
+   
+def _assess_confidence(scores: list[float]) -> tuple[str, float]:
+    if not scores:
+        return "low", 0.0
+    top_score = max(scores)
+    avg_score = sum(scores) / len(scores)
+    if top_score >= HIGH_CONFIDENCE:
+        return "high", avg_score
+    elif top_score >= MEDIUM_CONFIDENCE:
+        return "medium", avg_score
+    else:
+        return "low", avg_score
 
-
-
-# agent_result = agent.invoke(
-#     {"messages": [{"role": "user", "content": query}]},
-#     config={"configurable": {"thread_id": "great-gatsby-lc"}},
-# )
-
-def get_context(query: str) -> str:
-    """Tool function to retrieve relevant context from the vector database based on the user's query."""
-    retriever = Retriever(search_type="similarity", top_k=5)
-    results = retriever.retrieve(query)
+@tool("retrieve_context", description="Retrieves relevant context from the knowledge base for a given query.")
+def retriever_context(query:str)->dict:
+    results = _retriever.retrieve_with_scores(query)
     if not results:
-        return "No relevant context found."
-    context = "\n".join([f"{doc.page_content} (source: {doc.metadata.get('source', 'unknown')})" for doc in results])
-    return context
+        return {
+            "documents": [],
+            "scores": [],
+            "avg_confidence_score": 0.0,
+            "avg_confidence_level": "low"
+        }
+    documents, scores = [doc for doc, _ in results], [score for _, score in results]
+    confidence_level, avg_confidence_score = _assess_confidence(scores)
+    serialized_documents = [
+        {
+            "page_content": doc.page_content,
+            "source": doc.metadata.get("source", "unknown"),  # ← explicit metadata field
+            "page_number": doc.metadata.get("page_number", 0),
+        }
+        for doc in documents
+    ]
+    # print(f"Serialized documents: {serialized_documents}")
+    return {
+        "documents": serialized_documents,
+        "scores": scores,
+        "avg_confidence_score": avg_confidence_score,
+        "avg_confidence_level": confidence_level
+    }
 
-agent = create_agent(
-    model=model,
-    tools=[get_context],
-    system_prompt=SYSTEM_PROMPT,
-    checkpointer=checkpointer,
-)
 
-# Streaming Agent invocation
-for chunk in agent.stream(
-    {"messages": [{"role": "user", "content": query}]},
-    config={"configurable": {"thread_id": "federated-learning-lc"}},
-    stream_mode="messages",
-    version="v2",
-):
-    if chunk["type"] == "messages":
-        token, metadata = chunk["data"]
-        print(f"node: {metadata['langgraph_node']}")
-        print(f"content: {token.content_blocks}")
-        print("\n")
+TOOLS = [retriever_context]
+
+
+SYSTEM_PROMPT = """You are a helpful assistant that answers questions using retrieved context 
+from a vector database. When a user asks a question, use the retrieve_context tool to fetch 
+relevant information, then provide a clear and accurate answer based on that context.
+Always cite all the sources and their confidence scores for the information when available."""
+
+
+class Agent:
+    def __init__(self):
+        self.model = init_chat_model(
+            "gemini-3.1-flash-lite",
+            model_provider="google-genai",
+            temperature=0.4,
+            timeout=300,
+            max_tokens=2500,
+        ).bind_tools(TOOLS)
+
+        self.checkpointer = InMemorySaver()
+
+        self.agent = create_agent(
+            model=self.model,
+            tools=TOOLS,
+            system_prompt=SYSTEM_PROMPT,
+            response_format=AgentResponse,
+            middleware=[
+                SummarizationMiddleware(
+                    model="google_genai:gemini-3.1-flash-lite",
+                    trigger=[("tokens", 3000), ("messages", 6)],
+                    keep=("messages", 2),
+                ),
+                ModelCallLimitMiddleware(
+                    thread_limit=20,
+                    run_limit=5,
+                    exit_behavior="end",
+                ),
+                ToolCallLimitMiddleware(
+                    tool_name="retrieve_context",
+                    thread_limit=10,
+                    run_limit=5,
+                ),
+                ToolRetryMiddleware(
+                    max_retries=3,
+                ),
+            ]
+        )
+
+    def invoke(self, query: str, thread_id: str = "default") -> str:
+
+        result = self.agent.invoke( {"messages": [HumanMessage(content=query)]},
+            config={"configurable": {"thread_id": thread_id}}
+        )
+        print("Raw agent output:", result)
+        structured = result.get("structured_response")
+        if structured and isinstance(structured, AgentResponse):
+            return structured
+        else:
+            return AgentResponse(
+                answer=result.get("response", "Sorry, I couldn't generate an answer."),
+                confidence_score=0.0,
+                confidence_level="low"
+            )
+        
+
+if __name__ == "__main__":
+    agent = Agent()
+
+    query = "What is Continuous Deployment?"
+    print(f"Query: {query}\n")
+
+    response = agent.invoke(query, thread_id="session-1")
+    print(f"Answer:\n{response.answer}")
+    #print(f"Confidence: {response.confidence_level} ({response.confidence_score})")
+        
+    
