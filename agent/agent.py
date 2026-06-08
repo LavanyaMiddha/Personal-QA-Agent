@@ -8,6 +8,8 @@ from typing import Literal
 from pydantic import BaseModel, Field
 from langchain.agents.middleware import SummarizationMiddleware, ModelCallLimitMiddleware, ToolCallLimitMiddleware, ToolRetryMiddleware
 from langchain_core.messages import AnyMessage, SystemMessage, HumanMessage, AIMessage
+from langchain_core.globals import set_llm_cache
+from langchain_community.cache import SQLiteCache
 
 load_dotenv()
 
@@ -89,6 +91,7 @@ class Agent:
         ).bind_tools(TOOLS)
 
         self.checkpointer = InMemorySaver()
+        set_llm_cache(SQLiteCache(database_path=".langchain_cache.db"))
 
         self.agent = create_agent(
             model=self.model,
@@ -137,8 +140,14 @@ class Agent:
 if __name__ == "__main__":
     agent = Agent()
 
-    query = "What is Continuous Deployment?"
-    print(f"Query: {query}\n")
+    query = "What is config management? What are the tools used for configuration management?"
+    print(f"Query 1: {query}\n")
+
+    response = agent.invoke(query, thread_id="session-1")
+    print(f"Answer:\n{response.answer}")
+    query = "What is config management? What are the tools used for configuration management?"
+    print("\n\n\n")
+    print(f"Query 2: {query}\n")
 
     response = agent.invoke(query, thread_id="session-1")
     print(f"Answer:\n{response.answer}")
