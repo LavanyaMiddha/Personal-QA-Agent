@@ -7,12 +7,72 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 class DataLoader:
 
+    def extract_images(pdf, page, page_num, output_dir):
+        image_paths = []
+
+        for idx, img in enumerate(page.get_images(full=True)):
+            try:
+                xref = img[0]
+
+                image_data = pdf.extract_image(xref)
+
+                image_bytes = image_data["image"]
+                ext = image_data["ext"]
+
+                image_path = (
+                    output_dir
+                    / f"page_{page_num+1}_image_{idx}.{ext}"
+                )
+
+                with open(image_path, "wb") as f:
+                    f.write(image_bytes)
+
+                image_paths.append(str(image_path))
+
+            except Exception as e:
+                print(f"Failed image extraction: {e}")
+
+        return image_paths
+    
+    def is_valid_table(table) -> bool:
+        try:
+            df = table.to_pandas()
+
+            rows, cols = df.shape
+
+            if rows < 2:
+                return False
+
+            if cols < 2:
+                return False
+
+            text_chars = (
+                df.fillna("")
+                .astype(str)
+                .applymap(len)
+                .sum()
+                .sum()
+            )
+
+            avg_chars_per_cell = text_chars / max(rows * cols, 1)
+
+            return avg_chars_per_cell > 3
+
+        except Exception:
+            return False
+
     def load_pdf(self, file_path: str):
         pdf = pymupdf.open(file_path)
         documents = []
         for ipage, page in enumerate(pdf):
             text = page.get_text()
-            documents.append(Document(page_content=text, metadata={"source": file_path, "page_number": ipage}))
+            images = page.get_images()
+            tables = page.find_tables()
+            if images:
+                print(f"Found images! in {file_path} on slide {ipage}")
+            if tables:
+                print(f"Found tables! in {file_path} on slide {ipage}")
+            documents.append(Document(page_content=text, metadata={"source": file_path, "page_number": ipage+1}))
         return documents
 
     def load_pdfs(self, file_directory: str):
@@ -35,7 +95,7 @@ class DataLoader:
 
 if __name__ == "__main__":
     data_loader = DataLoader()
-    documents = data_loader.load_pdfs("../data/pdf_files")
+    documents = data_loader.load_pdfs("data/pdf_files")
     print(f"Pages loaded: {len(documents)}")
     splits = data_loader.return_splits(documents)
     print(f"Splits created: {len(splits)}")
